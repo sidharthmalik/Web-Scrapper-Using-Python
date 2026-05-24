@@ -1,0 +1,14 @@
+Each lead gets scored 0–100 based on:
+
+  Has verified email    → +35 points
+  Has phone number      → +20 points
+  Has website           → +15 points
+  Rating (e.g. 4.5★)   → +10 points
+  Source quality        → +8  points
+  Business keywords     → +7  points
+  Address completeness  → +5  points
+
+Grade A = 75+   → definitely email these
+Grade B = 55–74 → good leads, worth trying
+Grade C = 35–54 → borderline, use judgment
+Grade D = <35   → skip these
