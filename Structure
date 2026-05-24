@@ -1,0 +1,6 @@
+Web-Scrapper-Using-Python/
+├── scrapper.py          ← unchanged (your scraper)
+├── lead_scorer.py       ← new ML model
+├── email_sender.py      ← new email engine
+├── main.py              ← new control panel
+└── emails_sent_log.csv  ← auto-created when emails are sent
