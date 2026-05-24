@@ -16,34 +16,43 @@ import httpx
 # TEXT CLEANER
 # ─────────────────────────────────────────────────────────────
 def clean_text(value: str) -> str:
-    if not value or value == "N/A":
+    if not value or str(value).strip() in ("", "N/A", "None"):
         return "N/A"
+    value = str(value)
     value = value.replace("\n", " ").replace("\r", " ").replace("\t", " ")
-    value = re.sub(r"\s+", " ", value)
-    value = value.strip()
-    value = re.sub(r"[^\x20-\x7E\u0900-\u097F]", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
     return value if value else "N/A"
 
 
 # ─────────────────────────────────────────────────────────────
-# MAIN SCRAPER CLASS
+# LEAD SCRAPER
 # ─────────────────────────────────────────────────────────────
 class LeadScraper:
-    def __init__(self):
-        self.ua = UserAgent()
-        self.leads = []
+    def __init__(self, headless: bool = False):
+        """
+        headless=False  → browser window opens so you can SEE what's happening
+        headless=True   → runs invisibly in background (use after it's working)
+        """
+        self.ua     = UserAgent()
+        self.leads  = []
+        self.headless = headless
 
     async def init_browser(self, playwright):
         browser = await playwright.chromium.launch(
-            headless=True,
+            headless=self.headless,
             args=[
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                "--start-maximized",
             ]
         )
         context = await browser.new_context(
-            user_agent=self.ua.random,
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
             viewport={"width": 1280, "height": 800},
             extra_http_headers={
                 "Accept-Language": "en-US,en;q=0.9",
@@ -52,193 +61,509 @@ class LeadScraper:
         )
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins',   { get: () => [1, 2, 3] });
+            window.chrome = { runtime: {} };
         """)
         return browser, context
 
-    async def human_delay(self, min_sec=1.5, max_sec=4.0):
+    async def human_delay(self, min_sec=1.5, max_sec=3.5):
         await asyncio.sleep(random.uniform(min_sec, max_sec))
 
-    async def human_scroll(self, page):
-        height = await page.evaluate("document.body.scrollHeight")
-        steps  = random.randint(3, 6)
-        for i in range(steps):
-            await page.evaluate(f"window.scrollTo(0, {(height / steps) * (i + 1)})")
-            await asyncio.sleep(random.uniform(0.3, 0.8))
+    async def slow_scroll(self, page, times=5):
+        for _ in range(times):
+            await page.evaluate("window.scrollBy(0, 300)")
+            await asyncio.sleep(random.uniform(0.4, 0.9))
 
-    # ─────────────────────────────────────────────────────────
-    # SCRAPER 1: Yellow Pages
-    # ─────────────────────────────────────────────────────────
-    async def scrape_yellowpages(self, query: str, location: str, max_pages: int = 3):
-        print(f"\n[Yellow Pages] Searching: '{query}' in '{location}'")
+    # ──────────────────────────────────────────────────────────
+    # SCRAPER 1: GOOGLE MAPS (most reliable for Indian cities)
+    # ──────────────────────────────────────────────────────────
+    async def scrape_google_maps(
+        self,
+        query: str,
+        location: str,
+        max_results: int = 20
+    ):
+        print(f"\n{'='*55}")
+        print(f"  [Google Maps] '{query}' in '{location}'")
+        print(f"{'='*55}")
+
         async with async_playwright() as p:
             browser, context = await self.init_browser(p)
             page = await context.new_page()
 
-            for page_num in range(1, max_pages + 1):
-                url = (
-                    f"https://www.yellowpages.com/search"
-                    f"?search_terms={query}&geo_location={location}&page={page_num}"
-                )
-                print(f"  → Page {page_num}: {url}")
-                try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    await self.human_delay(2, 4)
-                    await self.human_scroll(page)
+            search_term = f"{query} in {location}"
+            url = f"https://www.google.com/maps/search/{search_term.replace(' ', '+')}"
 
-                    soup     = BeautifulSoup(await page.content(), "html.parser")
-                    listings = soup.select("div.result")
+            print(f"  → Opening: {url}")
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(3000)  # give Maps 3 extra seconds to render
+            await self.human_delay(3, 5)
 
-                    if not listings:
-                        print(f"  → No more results on page {page_num}")
-                        break
-
-                    for listing in listings:
-                        name    = listing.select_one("a.business-name")
-                        phone   = listing.select_one("div.phones")
-                        street  = listing.select_one("div.street-address")
-                        city    = listing.select_one("div.locality")
-                        website = listing.select_one("a.track-visit-website")
-                        cat     = listing.select_one("div.categories")
-
-                        lead = {
-                            "source":        "yellowpages",
-                            "business_name": name.text.strip()    if name    else "N/A",
-                            "phone":         phone.text.strip()   if phone   else "N/A",
-                            "address": (
-                                f"{street.text.strip() if street else ''} "
-                                f"{city.text.strip()   if city   else ''}"
-                            ).strip(),
-                            "website":  website.get("href", "N/A") if website else "N/A",
-                            "category": cat.text.strip()           if cat     else "N/A",
-                            "email":    "N/A",
-                            "rating":   "N/A",
-                        }
-                        self.leads.append(lead)
-                        print(f"     ✓ {lead['business_name']} | {lead['phone']}")
-
-                    await self.human_delay(2, 5)
-
-                except Exception as e:
-                    print(f"  → Error on page {page_num}: {e}")
-                    continue
-
-            await browser.close()
-
-    # ─────────────────────────────────────────────────────────
-    # SCRAPER 2: Google Maps
-    # ─────────────────────────────────────────────────────────
-    async def scrape_google_maps(self, query: str, location: str, max_results: int = 20):
-        print(f"\n[Google Maps] Searching: '{query}' near '{location}'")
-        async with async_playwright() as p:
-            browser, context = await self.init_browser(p)
-            page = await context.new_page()
-
-            url = f"https://www.google.com/maps/search/{(query + ' in ' + location).replace(' ', '+')}"
-
+            # ── Accept cookies popup if it appears (EU/some regions) ──
             try:
-                await page.goto(url, wait_until="networkidle", timeout=30000)
-                await self.human_delay(2, 4)
+                accept_btn = await page.query_selector("button[aria-label='Accept all']")
+                if accept_btn:
+                    await accept_btn.click()
+                    await self.human_delay(1, 2)
+                    print("  → Accepted cookies popup")
+            except Exception:
+                pass
 
-                results_scraped = 0
-                previous_count  = 0
+            # ── Wait for results feed to appear ───────────────────────
+            print("  → Waiting for results to load...")
+            try:
+                await page.wait_for_selector(
+                    "div[role='feed']",
+                    timeout=15000
+                )
+                print("  → Results feed found ✓")
+            except Exception:
+                print("  ✗ Results feed not found — trying alternative...")
+                # Take screenshot so you can see what happened
+                await page.screenshot(path=os.path.expanduser("~/Desktop/debug_maps.png"))
+                print("  → Screenshot saved to Desktop/debug_maps.png")
+                await browser.close()
+                return
 
-                while results_scraped < max_results:
+            scraped = 0
+            scroll_attempts = 0
+            MAX_SCROLL_ATTEMPTS = 15
+
+            while scraped < max_results and scroll_attempts < MAX_SCROLL_ATTEMPTS:
+
+                # ── Get all listing links currently visible ────────────
+                # Google Maps uses multiple possible selectors — try all
+                listings = await page.query_selector_all("a.hfpxzc")
+
+                if not listings:
                     listings = await page.query_selector_all(
-                        "div[role='feed'] > div > div > a"
+                        "div[role='feed'] a[href*='/maps/place/']"
                     )
 
-                    if len(listings) == previous_count:
-                        print("  → No new results loading, stopping.")
+                print(f"  → Found {len(listings)} listings on screen, scraped {scraped} so far")
+
+                for listing in listings:
+                    if scraped >= max_results:
                         break
 
-                    for listing in listings[previous_count:]:
-                        if results_scraped >= max_results:
-                            break
-                        try:
-                            await listing.click()
-                            await self.human_delay(1.5, 3)
+                    try:
+                        # Click the listing to open its detail panel
+                        await listing.click()
+                        await self.human_delay(2, 3)
 
-                            name_el    = await page.query_selector("h1.DUwDvf")
-                            phone_el   = await page.query_selector("button[data-item-id^='phone']")
-                            address_el = await page.query_selector("button[data-item-id='address']")
-                            website_el = await page.query_selector("a[data-item-id='authority']")
-                            rating_el  = await page.query_selector("div.F7nice span")
+                        # ── Try multiple selector patterns for each field ──
 
-                            lead = {
-                                "source":        "google_maps",
-                                "business_name": await name_el.inner_text()                  if name_el    else "N/A",
-                                "phone":         await phone_el.get_attribute("data-tooltip") if phone_el   else "N/A",
-                                "address":       await address_el.inner_text()               if address_el else "N/A",
-                                "website":       await website_el.get_attribute("href")      if website_el else "N/A",
-                                "rating":        await rating_el.inner_text()                if rating_el  else "N/A",
-                                "email":         "N/A",
-                                "category":      query,
-                            }
+                        # NAME — try 3 different selectors
+                        name = "N/A"
+                        for sel in ["h1.DUwDvf", "h1[class*='fontHeadlineLarge']", "h1"]:
+                            el = await page.query_selector(sel)
+                            if el:
+                                name = await el.inner_text()
+                                break
 
-                            if lead["business_name"] != "N/A":
-                                self.leads.append(lead)
-                                results_scraped += 1
-                                print(f"     ✓ {lead['business_name']} | {lead['phone']} | {lead['address'][:40]}")
+                        # PHONE — try multiple patterns
+                        phone = "N/A"
+                        for sel in [
+                            "button[data-item-id^='phone:tel']",
+                            "button[aria-label*='Phone']",
+                            "[data-tooltip*='+']",
+                            "span[aria-label*='phone' i]",
+                        ]:
+                            el = await page.query_selector(sel)
+                            if el:
+                                phone = (
+                                    await el.get_attribute("aria-label")
+                                    or await el.get_attribute("data-item-id")
+                                    or await el.inner_text()
+                                )
+                                # Clean up phone — extract digits and +
+                                phone = re.sub(r"[^\d\+\-\s\(\)]", "", phone).strip()
+                                if phone:
+                                    break
 
-                        except Exception as e:
-                            print(f"     → Skipped one listing: {e}")
+                        # ADDRESS
+                        address = "N/A"
+                        for sel in [
+                            "button[data-item-id='address']",
+                            "button[aria-label*='Address']",
+                            "[data-item-id*='address']",
+                        ]:
+                            el = await page.query_selector(sel)
+                            if el:
+                                address = (
+                                    await el.get_attribute("aria-label")
+                                    or await el.inner_text()
+                                )
+                                address = address.replace("Address: ", "").strip()
+                                break
+
+                        # WEBSITE
+                        website = "N/A"
+                        for sel in [
+                            "a[data-item-id='authority']",
+                            "a[aria-label*='website' i]",
+                            "a[href*='http'][aria-label]",
+                        ]:
+                            el = await page.query_selector(sel)
+                            if el:
+                                website = await el.get_attribute("href") or "N/A"
+                                break
+
+                        # RATING
+                        rating = "N/A"
+                        for sel in [
+                            "div.F7nice span[aria-hidden='true']",
+                            "span[aria-label*='stars' i]",
+                            "div.fontBodyMedium span[aria-hidden]",
+                        ]:
+                            el = await page.query_selector(sel)
+                            if el:
+                                rating = await el.inner_text()
+                                if re.search(r"\d", rating):
+                                    break
+                                rating = "N/A"
+
+                        # CATEGORY
+                        category = "N/A"
+                        for sel in [
+                            "button.DkEaL",
+                            "span.YhemCb",
+                            "button[jsaction*='category']",
+                        ]:
+                            el = await page.query_selector(sel)
+                            if el:
+                                category = await el.inner_text()
+                                break
+
+                        # ── Skip if we got nothing useful ─────────────
+                        if name == "N/A":
                             continue
 
-                    previous_count = len(listings)
+                        # ── Check for duplicate ───────────────────────
+                        already_scraped = any(
+                            l["business_name"] == clean_text(name)
+                            for l in self.leads
+                        )
+                        if already_scraped:
+                            continue
+
+                        lead = {
+                            "source":        "google_maps",
+                            "business_name": clean_text(name),
+                            "phone":         clean_text(phone),
+                            "address":       clean_text(address),
+                            "website":       clean_text(website),
+                            "rating":        clean_text(rating),
+                            "category":      clean_text(category) if category != "N/A" else query,
+                            "email":         "N/A",
+                        }
+
+                        self.leads.append(lead)
+                        scraped += 1
+                        print(
+                            f"     [{scraped}/{max_results}] "
+                            f"{lead['business_name'][:35]:<35} | "
+                            f"{lead['phone']:<15} | "
+                            f"{lead['address'][:30]}"
+                        )
+
+                    except Exception as e:
+                        print(f"     → Skipped listing: {e}")
+                        continue
+
+                # ── Scroll results panel to load more ────────────────
+                try:
                     feed = await page.query_selector("div[role='feed']")
                     if feed:
-                        await feed.evaluate("el => el.scrollTop += 1000")
-                    await self.human_delay(1.5, 3)
+                        await feed.evaluate("el => el.scrollTop += 1500")
+                    scroll_attempts += 1
+                    await self.human_delay(2, 3)
+                except Exception:
+                    scroll_attempts += 1
+
+            print(f"\n  ✅ Google Maps done — {scraped} leads collected")
+            await browser.close()
+
+    # ──────────────────────────────────────────────────────────
+    # SCRAPER 2: JUSTDIAL (best for Indian businesses)
+    # ──────────────────────────────────────────────────────────
+    async def scrape_justdial(
+        self,
+        query: str,
+        location: str,
+        max_results: int = 20
+    ):
+        print(f"\n{'='*55}")
+        print(f"  [JustDial] '{query}' in '{location}'")
+        print(f"{'='*55}")
+
+        async with async_playwright() as p:
+            browser, context = await self.init_browser(p)
+            page = await context.new_page()
+
+            # Format: https://www.justdial.com/Mumbai/Restaurants
+            loc   = location.replace(" ", "-")
+            q     = query.replace(" ", "-").title()
+            url   = f"https://www.justdial.com/{loc}/{q}"
+
+            print(f"  → Opening: {url}")
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await self.human_delay(3, 5)
+
+                # Close login popup if appears
+                try:
+                    close_btn = await page.query_selector(
+                        "span.css-jgqnru, button.close, [aria-label='Close']"
+                    )
+                    if close_btn:
+                        await close_btn.click()
+                        await self.human_delay(1, 2)
+                        print("  → Closed popup")
+                except Exception:
+                    pass
+
+                scraped = 0
+                scroll_rounds = 0
+
+                while scraped < max_results and scroll_rounds < 10:
+
+                    html  = await page.content()
+                    soup  = BeautifulSoup(html, "html.parser")
+
+                    # JustDial listing cards
+                    cards = soup.select("li.cntanr, li[class*='store-cards'], div.resultbox_info")
+
+                    print(f"  → Found {len(cards)} cards | scraped {scraped} so far")
+
+                    for card in cards:
+                        if scraped >= max_results:
+                            break
+
+                        # NAME
+                        name_el = (
+                            card.select_one("span.lng_cont_name")
+                            or card.select_one("a.store-name")
+                            or card.select_one("h2 a")
+                            or card.select_one(".resultbox_title_anchor")
+                        )
+
+                        # PHONE — JustDial hides numbers, grab what's visible
+                        phone_el = (
+                            card.select_one("p.contact-info")
+                            or card.select_one("span.contact_info")
+                            or card.select_one("div.telCntct")
+                            or card.select_one("[class*='contact']")
+                        )
+
+                        # ADDRESS
+                        addr_el = (
+                            card.select_one("span.cont_fl_addr")
+                            or card.select_one("p.jd_address")
+                            or card.select_one("[class*='address']")
+                        )
+
+                        # RATING
+                        rating_el = (
+                            card.select_one("span.green-box")
+                            or card.select_one("[class*='rating']")
+                        )
+
+                        name   = name_el.text.strip()   if name_el   else "N/A"
+                        phone  = phone_el.text.strip()  if phone_el  else "N/A"
+                        addr   = addr_el.text.strip()   if addr_el   else "N/A"
+                        rating = rating_el.text.strip() if rating_el else "N/A"
+
+                        if name == "N/A":
+                            continue
+
+                        already = any(
+                            l["business_name"] == clean_text(name)
+                            for l in self.leads
+                        )
+                        if already:
+                            continue
+
+                        lead = {
+                            "source":        "justdial",
+                            "business_name": clean_text(name),
+                            "phone":         clean_text(phone),
+                            "address":       clean_text(addr),
+                            "website":       "N/A",
+                            "rating":        clean_text(rating),
+                            "category":      query,
+                            "email":         "N/A",
+                        }
+                        self.leads.append(lead)
+                        scraped += 1
+                        print(
+                            f"     [{scraped}/{max_results}] "
+                            f"{lead['business_name'][:35]:<35} | "
+                            f"{lead['phone']}"
+                        )
+
+                    # Scroll down to load more
+                    await page.evaluate("window.scrollBy(0, 1500)")
+                    scroll_rounds += 1
+                    await self.human_delay(2, 3)
+
+                print(f"\n  ✅ JustDial done — {scraped} leads collected")
 
             except Exception as e:
-                print(f"  → Fatal error: {e}")
+                print(f"  ✗ JustDial error: {e}")
+                await page.screenshot(
+                    path=os.path.expanduser("~/Desktop/debug_justdial.png")
+                )
+                print("  → Screenshot saved to Desktop/debug_justdial.png")
             finally:
                 await browser.close()
 
-    # ─────────────────────────────────────────────────────────
-    # EMAIL FINDER: Hunter.io API
-    # ─────────────────────────────────────────────────────────
-    async def find_email_via_hunter(self, domain: str, hunter_api_key: str) -> str:
-        if not hunter_api_key or domain == "N/A":
-            return "N/A"
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    "https://api.hunter.io/v2/domain-search",
-                    params={"domain": domain, "api_key": hunter_api_key},
-                    timeout=5.0
-                )
-                emails = resp.json().get("data", {}).get("emails", [])
-                if emails:
-                    best = sorted(emails, key=lambda x: x.get("confidence", 0), reverse=True)
-                    return best[0].get("value", "N/A")
-        except Exception:
-            pass
-        return "N/A"
+    # ──────────────────────────────────────────────────────────
+    # SCRAPER 3: INDIAMART (B2B suppliers & manufacturers)
+    # ──────────────────────────────────────────────────────────
+    async def scrape_indiamart(
+        self,
+        query: str,
+        location: str = "",
+        max_results: int = 20
+    ):
+        print(f"\n{'='*55}")
+        print(f"  [IndiaMart] '{query}'")
+        print(f"{'='*55}")
 
+        async with async_playwright() as p:
+            browser, context = await self.init_browser(p)
+            page = await context.new_page()
+
+            search = f"{query} {location}".strip().replace(" ", "+")
+            url = f"https://dir.indiamart.com/search.mp?ss={search}"
+
+            print(f"  → Opening: {url}")
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await self.human_delay(3, 5)
+
+                scraped = 0
+                scroll_rounds = 0
+
+                while scraped < max_results and scroll_rounds < 8:
+                    html = await page.content()
+                    soup = BeautifulSoup(html, "html.parser")
+
+                    cards = soup.select(
+                        "div.card, div.prd-card, div.company-listing, div[class*='supplier']"
+                    )
+
+                    print(f"  → Found {len(cards)} cards | scraped {scraped} so far")
+
+                    for card in cards:
+                        if scraped >= max_results:
+                            break
+
+                        name_el  = (
+                            card.select_one("h2 a")
+                            or card.select_one(".company-name a")
+                            or card.select_one("a.companyname")
+                        )
+                        phone_el = (
+                            card.select_one(".phone")
+                            or card.select_one("[class*='phone']")
+                            or card.select_one("[class*='contact']")
+                        )
+                        addr_el  = (
+                            card.select_one(".company-address")
+                            or card.select_one("[class*='address']")
+                            or card.select_one("span.loc")
+                        )
+
+                        name  = name_el.text.strip()  if name_el  else "N/A"
+                        phone = phone_el.text.strip() if phone_el else "N/A"
+                        addr  = addr_el.text.strip()  if addr_el  else "N/A"
+
+                        if name == "N/A":
+                            continue
+
+                        already = any(
+                            l["business_name"] == clean_text(name)
+                            for l in self.leads
+                        )
+                        if already:
+                            continue
+
+                        lead = {
+                            "source":        "indiamart",
+                            "business_name": clean_text(name),
+                            "phone":         clean_text(phone),
+                            "address":       clean_text(addr),
+                            "website":       "N/A",
+                            "rating":        "N/A",
+                            "category":      query,
+                            "email":         "N/A",
+                        }
+                        self.leads.append(lead)
+                        scraped += 1
+                        print(
+                            f"     [{scraped}/{max_results}] "
+                            f"{lead['business_name'][:35]:<35} | "
+                            f"{lead['phone']}"
+                        )
+
+                    await page.evaluate("window.scrollBy(0, 1500)")
+                    scroll_rounds += 1
+                    await self.human_delay(2, 3)
+
+                print(f"\n  ✅ IndiaMart done — {scraped} leads collected")
+
+            except Exception as e:
+                print(f"  ✗ IndiaMart error: {e}")
+            finally:
+                await browser.close()
+
+    # ──────────────────────────────────────────────────────────
+    # EMAIL FINDER via Hunter.io API
+    # ──────────────────────────────────────────────────────────
     async def enrich_leads_with_emails(self, hunter_api_key: str):
-        print(f"\n[Hunter.io] Enriching {len(self.leads)} leads with emails...")
+        eligible = [
+            l for l in self.leads
+            if l.get("website", "N/A") != "N/A"
+        ]
+        print(f"\n[Hunter.io] Enriching {len(eligible)} leads that have websites...")
+
         for i, lead in enumerate(self.leads):
-            if lead.get("website") and lead["website"] != "N/A":
-                domain = (
-                    lead["website"]
-                    .replace("https://", "")
-                    .replace("http://", "")
-                    .split("/")[0]
-                )
-                email = await self.find_email_via_hunter(domain, hunter_api_key)
-                self.leads[i]["email"] = email
-                if email != "N/A":
-                    print(f"  ✓ {email}  ←  {lead['business_name']}")
+            if lead.get("website", "N/A") == "N/A":
+                continue
+            domain = (
+                lead["website"]
+                .replace("https://", "")
+                .replace("http://", "")
+                .split("/")[0]
+            )
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        "https://api.hunter.io/v2/domain-search",
+                        params={"domain": domain, "api_key": hunter_api_key},
+                        timeout=5.0
+                    )
+                    emails = resp.json().get("data", {}).get("emails", [])
+                    if emails:
+                        best = sorted(
+                            emails,
+                            key=lambda x: x.get("confidence", 0),
+                            reverse=True
+                        )
+                        self.leads[i]["email"] = best[0].get("value", "N/A")
+                        print(f"  ✓ {self.leads[i]['email']}  ← {lead['business_name']}")
+            except Exception:
+                pass
             await asyncio.sleep(0.5)
 
-    # ─────────────────────────────────────────────────────────
-    # EXPORT — clean CSV + formatted Excel
-    # ─────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
+    # EXPORT — formatted Excel + clean CSV
+    # ──────────────────────────────────────────────────────────
     def export(self, filename_base: str = None):
         if not self.leads:
-            print("No leads to export.")
+            print("\n  ✗ No leads collected. Check the debug screenshots on your Desktop.")
             return
 
         output_dir = os.path.expanduser("~/Desktop")
@@ -246,32 +571,26 @@ class LeadScraper:
         csv_path   = os.path.join(output_dir, f"{base}.csv")
         excel_path = os.path.join(output_dir, f"{base}.xlsx")
 
-        # ── Clean every field ─────────────────────────────────
         cleaned = [{k: clean_text(str(v)) for k, v in lead.items()} for lead in self.leads]
         df      = pd.DataFrame(cleaned)
 
-        # ── Deduplicate ───────────────────────────────────────
         before = len(df)
         df     = df.drop_duplicates(subset=["business_name", "phone"])
         df     = df.reset_index(drop=True)
 
-        # ── Column order ──────────────────────────────────────
         order = ["source","business_name","email","phone","address","website","category","rating"]
         df    = df[[c for c in order if c in df.columns]]
 
-        # ── CSV export ────────────────────────────────────────
         df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
-        # ── Excel export ──────────────────────────────────────
         wb = Workbook()
         ws = wb.active
         ws.title = "Leads"
 
         col_labels = {
-            "source": "Source", "business_name": "Business Name",
-            "email": "Email",   "phone": "Phone",
-            "address": "Address","website": "Website",
-            "category": "Category", "rating": "Rating",
+            "source":"Source","business_name":"Business Name",
+            "email":"Email","phone":"Phone","address":"Address",
+            "website":"Website","category":"Category","rating":"Rating",
         }
 
         header_fill = PatternFill("solid", fgColor="1C2B3A")
@@ -288,22 +607,20 @@ class LeadScraper:
         )
 
         columns = list(df.columns)
-
-        # Header row
         ws.row_dimensions[1].height = 22
-        for ci, col in enumerate(columns, 1):
-            cell            = ws.cell(row=1, column=ci)
-            cell.value      = col_labels.get(col, col.replace("_"," ").title())
-            cell.font       = header_font
-            cell.fill       = header_fill
-            cell.alignment  = c_align
-            cell.border     = border
 
-        # Data rows
+        for ci, col in enumerate(columns, 1):
+            cell           = ws.cell(row=1, column=ci)
+            cell.value     = col_labels.get(col, col.replace("_"," ").title())
+            cell.font      = header_font
+            cell.fill      = header_fill
+            cell.alignment = c_align
+            cell.border    = border
+
         for ri, row in df.iterrows():
-            er = ri + 2
-            ws.row_dimensions[er].height = 18
+            er   = ri + 2
             fill = odd_fill if ri % 2 == 0 else even_fill
+            ws.row_dimensions[er].height = 18
             for ci, col in enumerate(columns, 1):
                 cell           = ws.cell(row=er, column=ci)
                 cell.value     = row[col]
@@ -319,50 +636,84 @@ class LeadScraper:
                     cell.font      = body_font
                     cell.alignment = l_align
 
-        # Auto-fit column widths
         for ci, col in enumerate(columns, 1):
-            header_len  = len(col_labels.get(col, col)) + 4
-            content_len = df[col].astype(str).str.len().max() if len(df) > 0 else 0
-            width       = min(50, max(12, header_len, content_len + 2))
-            if col in ("address", "website"):
-                width = min(45, width)
-            ws.column_dimensions[get_column_letter(ci)].width = width
+            w = min(50, max(12, len(col_labels.get(col, col)) + 4,
+                    df[col].astype(str).str.len().max() + 2 if len(df) else 0))
+            if col in ("address","website"):
+                w = min(45, w)
+            ws.column_dimensions[get_column_letter(ci)].width = w
 
         ws.freeze_panes    = "A2"
         ws.auto_filter.ref = ws.dimensions
         wb.save(excel_path)
 
-        # ── Summary ───────────────────────────────────────────
         has_email = len(df[df["email"] != "N/A"]) if "email" in df.columns else 0
         print(f"\n{'='*52}")
         print(f"  ✅  {len(df)} leads  ({before - len(df)} duplicates removed)")
-        print(f"  📧  {has_email} leads with verified emails")
-        print(f"  📊  Excel → {excel_path}")
-        print(f"  📄  CSV   → {csv_path}")
+        print(f"  📧  {has_email} leads with emails")
+        print(f"  📊  Excel  → {excel_path}")
+        print(f"  📄  CSV    → {csv_path}")
         print(f"{'='*52}")
         return excel_path, csv_path
 
 
 # ─────────────────────────────────────────────────────────────
-# CONFIGURE AND RUN
+#  ██████╗ ██████╗ ███╗   ██╗████████╗██████╗  ██████╗ ██╗
+# ██╔════╝██╔═══██╗████╗  ██║╚══██╔══╝██╔══██╗██╔═══██╗██║
+# ██║     ██║   ██║██╔██╗ ██║   ██║   ██████╔╝██║   ██║██║
+# ██║     ██║   ██║██║╚██╗██║   ██║   ██╔══██╗██║   ██║██║
+# ╚██████╗╚██████╔╝██║ ╚████║   ██║   ██║  ██║╚██████╔╝███████╗
+#  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
+#
+#   CHANGE ONLY THIS SECTION FOR EACH CLIENT
 # ─────────────────────────────────────────────────────────────
 async def main():
-    scraper = LeadScraper()
 
-    # ── Change these 4 lines to control what gets scraped ────
+    # ── 1. WHAT TO SEARCH ────────────────────────────────────
     SEARCH_QUERY    = "digital marketing agency"
-    SEARCH_LOCATION = "Gurugram"
-    MAX_RESULTS     = 30
-    HUNTER_API_KEY  = ""       # Free key at hunter.io (25 lookups/month free)
+
+    # ── 2. WHERE ─────────────────────────────────────────────
+    SEARCH_LOCATION = "Mumbai"
+
+    # ── 3. HOW MANY LEADS ────────────────────────────────────
+    MAX_RESULTS     = 20
+
+    # ── 4. WHICH SOURCES TO USE ──────────────────────────────
+    #   True  = scrape this site
+    #   False = skip this site
+    USE_GOOGLE_MAPS = True
+    USE_JUSTDIAL    = True    # best for Indian businesses
+    USE_INDIAMART   = False   # best for B2B / manufacturers only
+
+    # ── 5. EMAIL ENRICHMENT ──────────────────────────────────
+    #   Get free key at hunter.io (25 free/month)
+    #   Leave blank "" to skip email finding
+    HUNTER_API_KEY  = ""
+
+    # ── 6. SHOW BROWSER WINDOW? ──────────────────────────────
+    #   True  = browser opens visibly (good for debugging)
+    #   False = runs silently in background
+    SHOW_BROWSER    = True
+
     # ─────────────────────────────────────────────────────────
+    # DO NOT CHANGE ANYTHING BELOW THIS LINE
+    # ─────────────────────────────────────────────────────────
+    scraper = LeadScraper(headless=not SHOW_BROWSER)
 
-    await scraper.scrape_google_maps(SEARCH_QUERY, SEARCH_LOCATION, MAX_RESULTS)
-    await scraper.scrape_yellowpages(SEARCH_QUERY, SEARCH_LOCATION, max_pages=3)
+    if USE_GOOGLE_MAPS:
+        await scraper.scrape_google_maps(SEARCH_QUERY, SEARCH_LOCATION, MAX_RESULTS)
 
-    if HUNTER_API_KEY:
+    if USE_JUSTDIAL:
+        await scraper.scrape_justdial(SEARCH_QUERY, SEARCH_LOCATION, MAX_RESULTS)
+
+    if USE_INDIAMART:
+        await scraper.scrape_indiamart(SEARCH_QUERY, SEARCH_LOCATION, MAX_RESULTS)
+
+    if HUNTER_API_KEY and scraper.leads:
         await scraper.enrich_leads_with_emails(HUNTER_API_KEY)
 
-    scraper.export(f"{SEARCH_QUERY.replace(' ', '_')}_{SEARCH_LOCATION}")
+    filename = f"{SEARCH_QUERY.replace(' ','_')}_{SEARCH_LOCATION}"
+    scraper.export(filename)
 
 
 if __name__ == "__main__":
