@@ -14,14 +14,25 @@ from openpyxl.utils import get_column_letter
 # ═══════════════════════════════════════════════════════════════
 
 # ── 1. WHAT TO SCRAPE ─────────────────────────────────────────
-SEARCH_QUERY    = "digital marketing agency"
-SEARCH_LOCATION = "Mumbai"
-MAX_RESULTS     = 30
+SEARCH_QUERY    = "dropshiping agency"
+SEARCH_LOCATION = "Los Angeles"
+MAX_RESULTS     = 50
 
 # ── 2. WHICH SOURCES ──────────────────────────────────────────
 USE_GOOGLE_MAPS = True
 USE_JUSTDIAL    = True
-USE_INDIAMART   = False
+USE_INDIAMART   = True 
+USE_YELP        = True
+USE_YELLOWPAGES = True
+USE_CLUTCH      = True
+USE_EUROPAGES   = True
+USE_KOMPASS     = True
+USE_MANTA       = True
+USE_BARK        = True
+USE_TRUSTPILOT  = True
+USE_HOTFROG     = True
+USE_BBB         = True
+USE_THOMASNET   = True
 
 # ── 3. EMAIL ENRICHMENT ───────────────────────────────────────
 HUNTER_API_KEY  = ""           # hunter.io — free 25/month

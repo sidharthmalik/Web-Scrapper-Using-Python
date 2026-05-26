@@ -36,7 +36,24 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
         "justdial":    0.7,
         "indiamart":   0.6,
         "yellowpages": 0.5,
-    }
+     "google_maps":  0.9,
+     "clutch":       0.9,   # High quality B2B
+     "trustpilot":   0.85,
+     "bbb":          0.85,
+     "yelp":         0.80,
+     "yellowpages":  0.75,
+     "kompass":      0.75,
+     "europages":    0.70,
+     "thomasnet":    0.70,
+     "manta":        0.65,
+     "bark":         0.65,
+     "hotfrog":      0.60,
+     "cylex":        0.55,
+     "expertise":    0.60,
+     "justdial":     0.7,
+     "indiamart":    0.6,
+}
+    
     features["source_score"] = df["source"].apply(
         lambda s: source_scores.get(str(s).lower(), 0.5)
     )
